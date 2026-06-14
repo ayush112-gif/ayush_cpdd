@@ -40,6 +40,18 @@ const transporter = nodemailer.createTransport({
 });
 
 console.log("🤖 Placement Agent Started");
+const express = require("express");
+const app = express();
+
+app.get("/", (req, res) => {
+  res.send("🚀 Placement Agent Running");
+});
+
+const PORT = process.env.PORT || 3000;
+
+app.listen(PORT, () => {
+  console.log(`🌐 Server running on port ${PORT}`);
+});
 
 // ----------------------------------------------------------------
 // Helper: download a Telegram file to local uploads folder

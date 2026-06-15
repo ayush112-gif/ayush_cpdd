@@ -38,7 +38,9 @@ if (!fs.existsSync(UPLOAD_DIR)) {
 // Nodemailer transporter (Gmail SMTP, IPv4 forced via dns.setDefaultResultOrder)
 // ----------------------------------------------------------------
 const transporter = nodemailer.createTransport({
-  service: "gmail",
+  host: "smtp-relay.brevo.com",
+  port: 587,
+  secure: false,
 
   auth: {
     user: process.env.EMAIL_USER,
@@ -50,11 +52,11 @@ const transporter = nodemailer.createTransport({
   socketTimeout: 60000,
 });
 
-transporter.verify((error, success) => {
+transporter.verify((error) => {
   if (error) {
-    console.error("SMTP Verify Error:", error);
+    console.error("❌ SMTP Verify Error:", error);
   } else {
-    console.log("✅ SMTP Ready");
+    console.log("✅ Brevo SMTP Ready");
   }
 });
 

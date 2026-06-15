@@ -2,8 +2,13 @@ require("dotenv").config();
 
 const fs = require("fs");
 const path = require("path");
+const dns = require("dns");
 const TelegramBot = require("node-telegram-bot-api");
+const nodemailer = require("nodemailer");
 const pdfParse = require("pdf-parse");
+
+// Force IPv4 DNS resolution - fixes ENETUNREACH/ETIMEDOUT to Gmail SMTP on Render
+dns.setDefaultResultOrder("ipv4first");
 const {
   extractJobDetails,
   generateProfessionalMail,
@@ -30,46 +35,15 @@ if (!fs.existsSync(UPLOAD_DIR)) {
 }
 
 // ----------------------------------------------------------------
-// Mail sending via Resend HTTP API (replaces nodemailer/SMTP)
+// Nodemailer transporter (Gmail SMTP, IPv4 forced via dns.setDefaultResultOrder)
 // ----------------------------------------------------------------
-const RESEND_API_URL = "https://api.resend.com/emails";
-const RESEND_FROM = process.env.RESEND_FROM || "onboarding@resend.dev";
-
-async function sendMailViaResend({ to, subject, text, html, attachments }) {
-  const payload = {
-    from: RESEND_FROM,
-    to: Array.isArray(to) ? to : [to],
-    subject,
-    text,
-    html,
-  };
-
-  if (attachments && attachments.length > 0) {
-    payload.attachments = attachments.map((att) => ({
-      filename: att.filename,
-      content: fs.readFileSync(att.path).toString("base64"),
-    }));
-  }
-
-  const response = await fetch(RESEND_API_URL, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${process.env.RESEND_API_KEY}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify(payload),
-  });
-
-  const data = await response.json();
-
-  if (!response.ok) {
-    const err = new Error(data?.message || "Resend API error");
-    err.details = data;
-    throw err;
-  }
-
-  return data;
-}
+const transporter = nodemailer.createTransport({
+  service: "gmail",
+  auth: {
+    user: process.env.EMAIL_USER,
+    pass: process.env.EMAIL_PASS,
+  },
+});
 
 console.log("🤖 Placement Agent Started");
 const express = require("express");
@@ -619,23 +593,25 @@ async function sendMailWithDraft(chatId, toEmail) {
 
   const htmlBody = buildEmailTemplate(subject, body, jobData);
 
-  const attachments = [];
+  const mailOptions = {
+    from: process.env.EMAIL_USER,
+    to: toEmail,
+    subject: subject,
+    text: body,
+    html: htmlBody,
+    attachments: [],
+  };
+
   if (draft.attachmentPaths && draft.attachmentPaths.length > 0) {
     for (const p of draft.attachmentPaths) {
-      attachments.push({
+      mailOptions.attachments.push({
         filename: path.basename(p),
         path: p,
       });
     }
   }
 
-  await sendMailViaResend({
-    to: toEmail,
-    subject,
-    text: body,
-    html: htmlBody,
-    attachments,
-  });
+  await transporter.sendMail(mailOptions);
 
   await bot.sendMessage(chatId, `✅ Mail sent successfully to ${toEmail}`);
 }

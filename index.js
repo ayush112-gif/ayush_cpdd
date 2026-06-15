@@ -2,13 +2,8 @@ require("dotenv").config();
 
 const fs = require("fs");
 const path = require("path");
-const dns = require("dns");
 const TelegramBot = require("node-telegram-bot-api");
-const nodemailer = require("nodemailer");
 const pdfParse = require("pdf-parse");
-
-// Force IPv4 DNS resolution - fixes ENETUNREACH/ETIMEDOUT to Gmail SMTP on Render
-dns.setDefaultResultOrder("ipv4first");
 const {
   extractJobDetails,
   generateProfessionalMail,
@@ -35,30 +30,54 @@ if (!fs.existsSync(UPLOAD_DIR)) {
 }
 
 // ----------------------------------------------------------------
-// Nodemailer transporter (Gmail SMTP, IPv4 forced via dns.setDefaultResultOrder)
+// Mail sending via Brevo HTTP API (replaces nodemailer/SMTP, which
+// Render's free tier blocks for outbound SMTP connections)
 // ----------------------------------------------------------------
-const transporter = nodemailer.createTransport({
-  host: "smtp-relay.brevo.com",
-  port: 587,
-  secure: false,
+const BREVO_API_URL = "https://api.brevo.com/v3/smtp/email";
+const BREVO_SENDER_EMAIL = process.env.BREVO_SENDER_EMAIL;
+const BREVO_SENDER_NAME = process.env.BREVO_SENDER_NAME || "GCET Placement Cell (CPDD)";
 
-  auth: {
-    user: process.env.EMAIL_USER,
-    pass: process.env.EMAIL_PASS,
-  },
+async function sendMailViaBrevo({ to, subject, text, html, attachments }) {
+  const payload = {
+    sender: { email: BREVO_SENDER_EMAIL, name: BREVO_SENDER_NAME },
+    to: [{ email: to }],
+    subject,
+    htmlContent: html,
+    textContent: text,
+  };
 
-  connectionTimeout: 60000,
-  greetingTimeout: 30000,
-  socketTimeout: 60000,
-});
-
-transporter.verify((error) => {
-  if (error) {
-    console.error("❌ SMTP Verify Error:", error);
-  } else {
-    console.log("✅ Brevo SMTP Ready");
+  if (attachments && attachments.length > 0) {
+    payload.attachment = attachments.map((att) => ({
+      name: att.filename,
+      content: fs.readFileSync(att.path).toString("base64"),
+    }));
   }
-});
+
+  const response = await fetch(BREVO_API_URL, {
+    method: "POST",
+    headers: {
+      "api-key": process.env.BREVO_API_KEY,
+      "Content-Type": "application/json",
+      Accept: "application/json",
+    },
+    body: JSON.stringify(payload),
+  });
+
+  let data = {};
+  try {
+    data = await response.json();
+  } catch (_) {
+    // some success responses may have empty body
+  }
+
+  if (!response.ok) {
+    const err = new Error(data?.message || `Brevo API error (status ${response.status})`);
+    err.details = data;
+    throw err;
+  }
+
+  return data;
+}
 
 console.log("🤖 Placement Agent Started");
 const express = require("express");
@@ -566,7 +585,7 @@ function buildEmailTemplate(subject, bodyText, jobData) {
 }
 
 // ----------------------------------------------------------------
-// Helper: send the final mail using Resend
+// Helper: send the final mail using Brevo
 // ----------------------------------------------------------------
 async function sendMailWithDraft(chatId, toEmail) {
   const draft = userDrafts.get(chatId);
@@ -608,25 +627,23 @@ async function sendMailWithDraft(chatId, toEmail) {
 
   const htmlBody = buildEmailTemplate(subject, body, jobData);
 
-  const mailOptions = {
-    from: process.env.EMAIL_USER,
-    to: toEmail,
-    subject: subject,
-    text: body,
-    html: htmlBody,
-    attachments: [],
-  };
-
+  const attachments = [];
   if (draft.attachmentPaths && draft.attachmentPaths.length > 0) {
     for (const p of draft.attachmentPaths) {
-      mailOptions.attachments.push({
+      attachments.push({
         filename: path.basename(p),
         path: p,
       });
     }
   }
 
-  await transporter.sendMail(mailOptions);
+  await sendMailViaBrevo({
+    to: toEmail,
+    subject,
+    text: body,
+    html: htmlBody,
+    attachments,
+  });
 
   await bot.sendMessage(chatId, `✅ Mail sent successfully to ${toEmail}`);
 }

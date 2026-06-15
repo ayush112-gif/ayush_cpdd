@@ -39,13 +39,25 @@ if (!fs.existsSync(UPLOAD_DIR)) {
 // ----------------------------------------------------------------
 const transporter = nodemailer.createTransport({
   host: "smtp.gmail.com",
-  port: 587,
-  secure: false,
-  requireTLS: true,
+  port: 465,
+  secure: true,
+
   auth: {
     user: process.env.EMAIL_USER,
     pass: process.env.EMAIL_PASS,
   },
+
+  connectionTimeout: 60000,
+  greetingTimeout: 30000,
+  socketTimeout: 60000,
+});
+
+transporter.verify((error, success) => {
+  if (error) {
+    console.error("SMTP Verify Error:", error);
+  } else {
+    console.log("✅ SMTP Ready");
+  }
 });
 
 console.log("🤖 Placement Agent Started");
@@ -925,6 +937,7 @@ bot.on("message", async (msg) => {
 // Callback query handler
 // ----------------------------------------------------------------
 bot.on("callback_query", async (query) => {
+    await bot.answerCallbackQuery(query.id);
   try {
     const chatId = query.message.chat.id;
     const action = query.data;
@@ -1257,7 +1270,7 @@ I'll write a professional mail for you, then you can attach a PDF/image and send
       );
     }
 
-    await bot.answerCallbackQuery(query.id);
+    
   } catch (error) {
     console.error(error);
   }

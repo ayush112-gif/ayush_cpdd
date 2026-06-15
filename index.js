@@ -3,7 +3,6 @@ require("dotenv").config();
 const fs = require("fs");
 const path = require("path");
 const TelegramBot = require("node-telegram-bot-api");
-const nodemailer = require("nodemailer");
 const pdfParse = require("pdf-parse");
 const {
   extractJobDetails,
@@ -30,17 +29,47 @@ if (!fs.existsSync(UPLOAD_DIR)) {
   fs.mkdirSync(UPLOAD_DIR, { recursive: true });
 }
 
-// Nodemailer transporter (Gmail SMTP)
-const transporter = nodemailer.createTransport({
-    host: "smtp.gmail.com",
-  port: 465,
-  secure: true,
-  family: 4,
-  auth: {
-    user: process.env.EMAIL_USER,
-    pass: process.env.EMAIL_PASS,
-  },
-});
+// ----------------------------------------------------------------
+// Mail sending via Resend HTTP API (replaces nodemailer/SMTP)
+// ----------------------------------------------------------------
+const RESEND_API_URL = "https://api.resend.com/emails";
+const RESEND_FROM = process.env.RESEND_FROM || "onboarding@resend.dev";
+
+async function sendMailViaResend({ to, subject, text, html, attachments }) {
+  const payload = {
+    from: RESEND_FROM,
+    to: Array.isArray(to) ? to : [to],
+    subject,
+    text,
+    html,
+  };
+
+  if (attachments && attachments.length > 0) {
+    payload.attachments = attachments.map((att) => ({
+      filename: att.filename,
+      content: fs.readFileSync(att.path).toString("base64"),
+    }));
+  }
+
+  const response = await fetch(RESEND_API_URL, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${process.env.RESEND_API_KEY}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(payload),
+  });
+
+  const data = await response.json();
+
+  if (!response.ok) {
+    const err = new Error(data?.message || "Resend API error");
+    err.details = data;
+    throw err;
+  }
+
+  return data;
+}
 
 console.log("🤖 Placement Agent Started");
 const express = require("express");
@@ -222,22 +251,11 @@ function stripAiSignature(text) {
 // and paragraphs/line breaks.
 // ----------------------------------------------------------------
 function markdownToHtml(text) {
-  // Preprocess: handle two common AI patterns:
-  //
-  // 1) "- CTC: 24 LPA - Base Salary: 18 LPA - Joining Bonus: 3 LPA"
-  //    (multiple bullets crammed onto one line)
-  //
-  // 2) "**Compensation Breakdown:** - CTC: 24 LPA - Base Salary: 18 LPA"
-  //    (a bold label immediately followed by inline bullets on the same line)
-  //
-  // Both get split into: a heading/label line, followed by one bullet
-  // per line.
   const preprocessed = text
     .split("\n")
     .map((rawLine) => {
       const line = rawLine.trim();
 
-      // Pattern 2: "**Label:**  - item - item - item" or "Label: - item - item"
       const labelWithBullets = line.match(/^(\*{0,2}[^:*\n]+:\*{0,2})\s+-\s+(.+)$/);
       if (labelWithBullets) {
         const label = labelWithBullets[1].trim();
@@ -245,15 +263,12 @@ function markdownToHtml(text) {
         const restParts = rest.split(/\s+-\s+/).map((p) => p.trim()).filter(Boolean);
 
         if (restParts.length > 1) {
-          // Multiple inline items -> label becomes its own line, items become bullets
           return [label, ...restParts.map((p) => `- ${p}`)].join("\n");
         } else if (restParts.length === 1) {
-          // A single "Label: - value" -> just join label and value back together
           return `${label} ${restParts[0]}`;
         }
       }
 
-      // Pattern 1: line already starts with "- " and has more " - " items inline
       if (/^[-*•]\s+/.test(line) && (line.match(/\s[-•]\s/g) || []).length >= 1) {
         const firstDashRemoved = line.replace(/^[-*•]\s+/, "");
         const parts = firstDashRemoved.split(/\s+[-•]\s+/).map((p) => p.trim()).filter(Boolean);
@@ -278,7 +293,6 @@ function markdownToHtml(text) {
     }
   };
 
-  // Inline formatting: **bold**, *italic*, and auto-highlight key values
   const inlineFormat = (line) => {
     let escaped = escapeHtml(line);
     escaped = escaped.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
@@ -286,8 +300,6 @@ function markdownToHtml(text) {
     return escaped;
   };
 
-  // Render a "Label: Value" bullet with the label in muted text and the
-  // value highlighted, e.g. "CTC: 24 LPA" -> CTC (muted) + 24 LPA (highlighted)
   const formatBulletLine = (content) => {
     const labelValueMatch = content.match(/^([^:]{1,40}):\s*(.+)$/);
     if (labelValueMatch) {
@@ -298,13 +310,11 @@ function markdownToHtml(text) {
     return inlineFormat(content);
   };
 
-  // All section cards use a single light red theme
   const sectionPalette = [
     { border: "#dc2626", bg: "#fef2f2", text: "#991b1b" },
   ];
   let sectionIndex = 0;
 
-  // Track whether we're currently inside an open "section card"
   let inSectionCard = false;
 
   const closeSectionCard = () => {
@@ -328,12 +338,10 @@ function markdownToHtml(text) {
   for (let rawLine of lines) {
     const line = rawLine.trim();
 
-    // Skip stray lines that are just asterisks (AI artifacts like "**" alone)
     if (/^\*+$/.test(line)) {
       continue;
     }
 
-    // Horizontal rule
     if (/^-{3,}$/.test(line)) {
       closeList();
       closeSectionCard();
@@ -341,7 +349,6 @@ function markdownToHtml(text) {
       continue;
     }
 
-    // Headings (###, ##, #) -> start a new highlighted section card
     const headingMatch = line.match(/^(#{1,3})\s+(.*)$/);
     if (headingMatch) {
       closeList();
@@ -351,8 +358,6 @@ function markdownToHtml(text) {
       continue;
     }
 
-    // Standalone bold "label:" lines, e.g. "**Eligibility Criteria:**"
-    // -> start a new highlighted section card
     const boldLabelMatch = line.match(/^\*\*([^*]+:)\*\*$/);
     if (boldLabelMatch) {
       closeList();
@@ -361,9 +366,6 @@ function markdownToHtml(text) {
       continue;
     }
 
-    // Plain "Label:" section title lines (no markdown), e.g. "Eligibility Criteria:",
-    // "Compensation Breakdown:", "Instructions:". Heuristic: short line, ends
-    // with a colon, no sentence-ending punctuation, not a greeting.
     const plainLabelMatch = line.match(/^([A-Za-z][A-Za-z0-9\s&/'-]{1,48}):$/);
     if (
       plainLabelMatch &&
@@ -376,7 +378,6 @@ function markdownToHtml(text) {
       continue;
     }
 
-    // Bullet list items (-, *, •)
     const bulletMatch = line.match(/^[-*•]\s+(.*)$/);
     if (bulletMatch) {
       if (!inList) {
@@ -387,7 +388,6 @@ function markdownToHtml(text) {
       continue;
     }
 
-    // Numbered list items (1. 2. ...)
     const numberedMatch = line.match(/^\d+\.\s+(.*)$/);
     if (numberedMatch) {
       if (!inList) {
@@ -400,15 +400,12 @@ function markdownToHtml(text) {
 
     closeList();
 
-    // Blank line -> paragraph break (also ends a section card if open)
     if (line === "") {
       closeList();
       closeSectionCard();
       continue;
     }
 
-    // Standalone "Label: Value" lines (not section titles, has a value
-    // after the colon) -> apply the same highlight treatment as bullets
     const inlineLabelValueMatch = line.match(/^([A-Za-z][A-Za-z0-9\s&/'-]{1,40}):\s+(.+)$/);
     if (inlineLabelValueMatch && !/[.!?]/.test(inlineLabelValueMatch[1])) {
       const wrapStyle = inSectionCard
@@ -419,7 +416,6 @@ function markdownToHtml(text) {
     }
 
     if (inSectionCard) {
-      // Plain text line inside an active section card
       htmlParts.push(`<p style="margin:0 0 6px 0;line-height:1.5;">${inlineFormat(line)}</p>`);
     } else {
       htmlParts.push(`<p style="margin:0 0 14px 0;">${inlineFormat(line)}</p>`);
@@ -432,13 +428,10 @@ function markdownToHtml(text) {
 }
 
 function buildEmailTemplate(subject, bodyText, jobData) {
-  // Remove leading preamble labels like "**Email Body:**"
   const noPreamble = stripAiPreamble(bodyText);
 
-  // Remove the AI's own sign-off so we don't get a duplicate signature
   const cleanedBody = stripAiSignature(noPreamble);
 
-  // Convert markdown (**bold**, ### headings, lists, ---) into HTML
   const escapedBody = markdownToHtml(cleanedBody);
 
   const company = jobData && jobData.company_name ? escapeHtml(jobData.company_name) : "";
@@ -451,7 +444,6 @@ function buildEmailTemplate(subject, bodyText, jobData) {
 
   const LOGO_URL = "https://raw.githubusercontent.com/ayush112-gif/cpdd-assets/main/Screenshot_2026-06-14_215901-removebg-preview.png";
 
-  // Quick-info chips (Company / Role / CTC / Deadline / Location / Batch)
   const chips = [];
   if (company) chips.push({ label: "Company", value: company, bg: "#eef2ff", fg: "#3730a3" });
   if (role) chips.push({ label: "Role", value: role, bg: "#f0fdf4", fg: "#166534" });
@@ -460,8 +452,6 @@ function buildEmailTemplate(subject, bodyText, jobData) {
   if (location) chips.push({ label: "Location", value: location, bg: "#f5f3ff", fg: "#5b21b6" });
   if (batch) chips.push({ label: "Batch", value: batch, bg: "#ecfeff", fg: "#0e7490" });
 
-  // Each chip is its own table cell with a fixed-ish min width; on mobile
-  // these wrap naturally because the outer table cells use display:inline-block
   const chipCells = chips
     .map(
       (chip) => `
@@ -480,7 +470,6 @@ function buildEmailTemplate(subject, bodyText, jobData) {
       </tr>`
     : "";
 
-  // CTA button if an application link is present
   const ctaBlock = applicationLink
     ? `<tr>
         <td class="content-pad" style="padding:6px 28px 22px 28px;" align="left">
@@ -588,7 +577,7 @@ function buildEmailTemplate(subject, bodyText, jobData) {
 }
 
 // ----------------------------------------------------------------
-// Helper: send the final mail using nodemailer
+// Helper: send the final mail using Resend
 // ----------------------------------------------------------------
 async function sendMailWithDraft(chatId, toEmail) {
   const draft = userDrafts.get(chatId);
@@ -601,7 +590,6 @@ async function sendMailWithDraft(chatId, toEmail) {
   }
 
   // Split AI-generated draft into subject + body
-  // Tries to detect a "Subject: ..." line, otherwise builds one from job data
   let subject;
   let body = draft.emailDraft;
 
@@ -614,8 +602,6 @@ async function sendMailWithDraft(chatId, toEmail) {
     const rolePart = jobData.role ? jobData.role : "";
     subject = `[Placement Opportunity] ${companyPart}${companyPart && rolePart ? " - " : ""}${rolePart}`.trim();
   } else {
-    // Custom mail (no job data) - derive a short subject from the first
-    // meaningful line of the body, or fall back to a generic subject
     const firstLine = (body.split("\n").find((l) => l.trim().length > 0) || "").trim();
     if (firstLine && !/^dear\b/i.test(firstLine)) {
       subject = firstLine.length > 80 ? firstLine.slice(0, 77) + "..." : firstLine;
@@ -633,25 +619,23 @@ async function sendMailWithDraft(chatId, toEmail) {
 
   const htmlBody = buildEmailTemplate(subject, body, jobData);
 
-  const mailOptions = {
-    from: process.env.SMTP_USER,
-    to: toEmail,
-    subject: subject,
-    text: body,
-    html: htmlBody,
-    attachments: [],
-  };
-
+  const attachments = [];
   if (draft.attachmentPaths && draft.attachmentPaths.length > 0) {
     for (const p of draft.attachmentPaths) {
-      mailOptions.attachments.push({
+      attachments.push({
         filename: path.basename(p),
         path: p,
       });
     }
   }
 
-  await transporter.sendMail(mailOptions);
+  await sendMailViaResend({
+    to: toEmail,
+    subject,
+    text: body,
+    html: htmlBody,
+    attachments,
+  });
 
   await bot.sendMessage(chatId, `✅ Mail sent successfully to ${toEmail}`);
 }
@@ -763,7 +747,6 @@ bot.on("message", async (msg) => {
       if (msg.photo && msg.photo.length > 0) {
         await bot.sendMessage(chatId, "📥 Downloading Image...");
 
-        // Take the highest resolution photo
         const photo = msg.photo[msg.photo.length - 1];
         const fileName = `image_${chatId}_${Date.now()}.jpg`;
         const filePath = await downloadTelegramFile(photo.file_id, fileName);
@@ -812,7 +795,7 @@ bot.on("message", async (msg) => {
           await sendMailWithDraft(chatId, text.trim());
         } catch (err) {
           console.error("Mail send error:", err);
-          await bot.sendMessage(chatId, "❌ Failed to send mail. Please check SMTP settings.");
+          await bot.sendMessage(chatId, "❌ Failed to send mail. Please check email settings.");
         }
       } else {
         await bot.sendMessage(chatId, "❌ Invalid email address. Please enter a valid email or Google Group address.");
@@ -836,7 +819,6 @@ bot.on("message", async (msg) => {
 
         userDrafts.set(chatId, { emailDraft });
 
-        // Custom mail has no associated job data
         userJobs.set(chatId, { jobData: {}, originalText: text });
 
         await bot.sendMessage(chatId, emailDraft, {
@@ -938,7 +920,6 @@ bot.on("message", async (msg) => {
 
     // -------- Default: treat as job notification text --------
     if (!text) {
-      // No text, no PDF, no image, no document we recognize
       return;
     }
 
@@ -1094,7 +1075,6 @@ await bot.sendMessage(chatId, emailDraft, {
       } else {
         let messageText = draft.whatsappDraft;
 
-        // wa.me pre-filled text has practical length limits; trim if too long
         const MAX_WA_LENGTH = 1500;
         if (messageText.length > MAX_WA_LENGTH) {
           messageText = messageText.slice(0, MAX_WA_LENGTH - 3) + "...";

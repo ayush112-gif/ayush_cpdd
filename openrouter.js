@@ -8,7 +8,7 @@ const client = new OpenAI({
 async function extractJobDetails(text) {
   try {
     const response = await client.chat.completions.create({
-      model: "google/gemini-2.0-flash-exp:free",
+      model: "google/gemini-2.0-flash-thinking-exp:free",
       temperature: 0,
       max_tokens: 800,
 
@@ -105,7 +105,7 @@ Rules:
 async function generateProfessionalMail(originalText, jobData) {
 
   const response = await client.chat.completions.create({
-    model: "google/gemini-2.0-flash-exp:free",
+    model: "google/gemini-2.0-flash-thinking-exp:free",
     temperature: 0.3,
     max_tokens: 900,
 
@@ -161,7 +161,7 @@ ${JSON.stringify(jobData, null, 2)}
 
 async function generateCustomMail(userInstruction) {
   const response = await client.chat.completions.create({
-    model: "google/gemini-2.0-flash-exp:free",
+    model: "google/gemini-2.0-flash-thinking-exp:free",
     temperature: 0.4,
     max_tokens: 900,
 
@@ -201,7 +201,7 @@ Signature Rules:
 async function extractTextFromImage(base64Image, mimeType) {
   try {
     const response = await client.chat.completions.create({
-      model: "google/gemini-2.0-flash-exp:free",
+      model: "google/gemini-2.0-flash-thinking-exp:free",
       temperature: 0,
       max_tokens: 800,
 
@@ -244,7 +244,7 @@ Return the extracted information as plain readable text (not JSON). Do not add c
 
 async function generateWhatsappMessage(originalText, jobData) {
   const response = await client.chat.completions.create({
-    model: "google/gemini-2.0-flash-exp:free",
+    model: "google/gemini-2.0-flash-thinking-exp:free",
     temperature: 0.4,
     max_tokens: 400,
 
